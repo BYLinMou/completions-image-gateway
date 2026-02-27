@@ -58,6 +58,9 @@ STREAM_CHUNK_SIZE=120
 - `STYLE_REFERENCE_SOURCE` supports one value only:
 - URL mode: `https://...`
 - Local path mode: `assets/style-reference.png`
+- Downstream `chat/completions` image input is supported from `messages[].content[]` with `type: "image_url"` (and `input_image`).
+- Downstream `content[]` order is preserved when forwarding to Gemini (`text/image/text/image` stays in that order).
+- If both downstream image and global style reference are enabled, both are sent to Gemini (no overwrite).
 - This proxy handles both `stream=true/false` from downstream and rewrites internally.
 
 ## Aspect Ratio Examples
@@ -110,6 +113,27 @@ curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
     "stream": true,
     "messages": [
       {"role": "user", "content": "A cinematic portrait of a cyberpunk cat in neon rain"}
+    ]
+  }'
+```
+
+Image + text example (`content[]`):
+
+```bash
+curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer CHANGE_ME_TO_A_STRONG_KEY" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "stream": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Generate a square anime style portrait"},
+          {"type": "image_url", "image_url": {"url": "https://example.com/ref.png"}}
+        ]
+      }
     ]
   }'
 ```

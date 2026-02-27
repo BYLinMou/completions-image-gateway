@@ -308,25 +308,183 @@ function requireApiKey(req, res, next) {
   return next();
 }
 
-function extractPrompt(messages) {
-  if (!Array.isArray(messages)) return "";
-  const lastUserMessage = [...messages]
-    .reverse()
-    .find((m) => m && m.role === "user");
-  if (!lastUserMessage) return "";
+function getLastUserMessage(messages) {
+  if (!Array.isArray(messages)) return null;
+  return [...messages].reverse().find((m) => m && m.role === "user") || null;
+}
 
-  const content = lastUserMessage.content;
-  if (typeof content === "string") return content.trim();
+function extractTextFromContentPart(part) {
+  if (!part || typeof part !== "object") return "";
+  if (
+    (part.type === "text" || part.type === "input_text") &&
+    typeof part.text === "string"
+  ) {
+    return part.text.trim();
+  }
+  return "";
+}
 
-  if (Array.isArray(content)) {
-    const textParts = content
-      .filter((part) => part && part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text.trim())
-      .filter(Boolean);
-    return textParts.join("\n");
+function extractImageUrlFromContentPart(part) {
+  if (!part || typeof part !== "object") return "";
+
+  if (part.type === "image_url") {
+    if (typeof part.image_url === "string") return part.image_url.trim();
+    if (part.image_url && typeof part.image_url.url === "string") {
+      return part.image_url.url.trim();
+    }
+  }
+
+  if (part.type === "input_image") {
+    if (typeof part.image_url === "string") return part.image_url.trim();
+    if (part.image_url && typeof part.image_url.url === "string") {
+      return part.image_url.url.trim();
+    }
+    if (typeof part.url === "string") return part.url.trim();
   }
 
   return "";
+}
+
+function inferMimeTypeFromUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    return inferMimeTypeFromFilePath(parsed.pathname);
+  } catch (_error) {
+    return "application/octet-stream";
+  }
+}
+
+function parseDataUrlInlineData(dataUrl) {
+  const match = /^data:([^;,]+)?(;base64)?,([\s\S]*)$/i.exec(String(dataUrl || ""));
+  if (!match) {
+    throw new Error("Invalid data URL format for downstream image");
+  }
+
+  const mimeType = normalizeMimeType(match[1] || "");
+  if (!mimeType.startsWith("image/")) {
+    throw new Error(`Unsupported downstream data URL mime type: ${mimeType || "unknown"}`);
+  }
+
+  const isBase64 = Boolean(match[2]);
+  const dataSegment = match[3] || "";
+  const buffer = isBase64
+    ? Buffer.from(dataSegment, "base64")
+    : Buffer.from(decodeURIComponent(dataSegment), "utf8");
+
+  if (!buffer.length) {
+    throw new Error("Downstream data URL image is empty");
+  }
+
+  return {
+    inlineData: {
+      mimeType,
+      data: buffer.toString("base64")
+    }
+  };
+}
+
+async function resolveDownstreamImageInlineData(imageUrl) {
+  const urlValue = String(imageUrl || "").trim();
+  if (!urlValue) {
+    throw new Error("Downstream image URL is empty");
+  }
+
+  if (urlValue.startsWith("data:")) {
+    return parseDataUrlInlineData(urlValue);
+  }
+
+  if (!isHttpUrl(urlValue)) {
+    throw new Error(
+      "Unsupported downstream image URL scheme. Use http(s) URL or data URL"
+    );
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, STYLE_REFERENCE_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(urlValue, {
+      method: "GET",
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch downstream image URL, status ${response.status}`
+      );
+    }
+
+    const mimeType =
+      normalizeMimeType(response.headers.get("content-type")) ||
+      inferMimeTypeFromUrl(urlValue);
+    if (!mimeType.startsWith("image/")) {
+      throw new Error(
+        `Unsupported downstream image mime type: ${mimeType || "unknown"}`
+      );
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const fileBuffer = Buffer.from(arrayBuffer);
+    if (!fileBuffer.length) {
+      throw new Error("Downloaded downstream image is empty");
+    }
+
+    return {
+      inlineData: {
+        mimeType,
+        data: fileBuffer.toString("base64")
+      }
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function extractUserInput(messages) {
+  const lastUserMessage = getLastUserMessage(messages);
+  if (!lastUserMessage) {
+    return { parts: [], hasText: false };
+  }
+
+  const content = lastUserMessage.content;
+  if (typeof content === "string") {
+    const trimmed = content.trim();
+    return {
+      parts: trimmed ? [{ text: trimmed }] : [],
+      hasText: Boolean(trimmed)
+    };
+  }
+
+  if (!Array.isArray(content)) {
+    return { parts: [], hasText: false };
+  }
+
+  const partPromises = content.map(async (part) => {
+    const text = extractTextFromContentPart(part);
+    if (text) {
+      return { text };
+    }
+
+    const imageUrl = extractImageUrlFromContentPart(part);
+    if (imageUrl) {
+      return resolveDownstreamImageInlineData(imageUrl);
+    }
+
+    return null;
+  });
+
+  const resolvedParts = await Promise.all(partPromises);
+  const parts = resolvedParts.filter(Boolean);
+  const hasText = parts.some(
+    (part) => part && typeof part.text === "string" && part.text.trim()
+  );
+
+  return {
+    parts,
+    hasText
+  };
 }
 
 function inferExtension(mimeType) {
@@ -354,9 +512,13 @@ function isHttpUrl(value) {
   return /^https?:\/\//i.test(value);
 }
 
-function buildPromptForGemini(userPrompt) {
-  if (!APPEND_STYLE_NOTICE) return userPrompt;
-  return `${userPrompt}\n\n${STYLE_NOTICE}`;
+function appendStyleNoticeToParts(parts) {
+  const normalized = Array.isArray(parts) ? [...parts] : [];
+  if (!APPEND_STYLE_NOTICE) return normalized;
+
+  const notice = String(STYLE_NOTICE || "").trim();
+  if (!notice) return normalized;
+  return [...normalized, { text: notice }];
 }
 
 function buildGeminiEndpoint() {
@@ -537,29 +699,37 @@ async function loadStyleReferenceInlineData() {
   };
 }
 
-async function generateImageFromGemini(prompt) {
+async function generateImageFromGemini({ requestParts = [] }) {
   if (!GEMINI_API_KEY) {
     throw new Error("Missing GEMINI_API_KEY in .env");
   }
+
+  const normalizedRequestParts = Array.isArray(requestParts)
+    ? requestParts.filter(Boolean)
+    : [];
+  const downstreamImageCount = normalizedRequestParts.filter(
+    (part) => part && part.inlineData && part.inlineData.data
+  ).length;
 
   const endpoint = buildGeminiEndpoint();
   logInfo("Calling Gemini upstream", {
     endpoint: maskApiKeyInUrl(endpoint),
     model: GEMINI_MODEL,
-    image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO
+    image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO,
+    downstream_image_count: downstreamImageCount
   });
 
   const styleReferencePart = await loadStyleReferenceInlineData();
-  const requestParts = [{ text: prompt }];
+  const finalRequestParts = [...normalizedRequestParts];
   if (styleReferencePart) {
-    requestParts.push(styleReferencePart);
+    finalRequestParts.push(styleReferencePart);
   }
 
   const payload = {
     contents: [
       {
         role: "user",
-        parts: requestParts
+        parts: finalRequestParts
       }
     ],
     generationConfig: {
@@ -700,21 +870,24 @@ app.post("/v1/chat/completions", async (req, res) => {
     const responseModel = model || "gpt-4o-mini";
     const completionId = `chatcmpl-${uuidv4()}`;
 
-    const prompt = extractPrompt(messages);
-    if (!prompt) {
+    const userInput = await extractUserInput(messages);
+    if (!userInput.hasText) {
       logWarn("Prompt extraction failed", {
         request_id: req.requestId
       });
       return res.status(400).json({
         error: {
-          message: "Invalid request: unable to extract user prompt from messages",
+          message:
+            "Invalid request: unable to extract user text prompt from messages",
           type: "invalid_request_error"
         }
       });
     }
 
-    const finalPrompt = buildPromptForGemini(prompt);
-    const image = await generateImageFromGemini(finalPrompt);
+    const finalRequestParts = appendStyleNoticeToParts(userInput.parts);
+    const image = await generateImageFromGemini({
+      requestParts: finalRequestParts
+    });
     const extension = inferExtension(image.mimeType);
     const fileName = `${uuidv4()}.${extension}`;
     const filePath = path.join(outputDirAbsPath, fileName);
