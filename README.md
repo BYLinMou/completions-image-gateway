@@ -16,7 +16,7 @@ PowerShell:
 Copy-Item .env.example .env
 ```
 
-## Simplified Environment Variables
+## Environment Variables
 
 ```env
 PORT=3000
@@ -44,16 +44,18 @@ LOG_LEVEL=info
 LOG_REQUEST_BODY=false
 ```
 
-Notes:
+## Important Notes
 
 - `GEMINI_ENDPOINT` is optional. If set, it has highest priority.
 - `GEMINI_ENDPOINT` placeholders: `{model}` and `{api_key}`.
 - If `GEMINI_ENDPOINT` has no `key=` and no `{api_key}`, service appends `?key=...` automatically.
-- `STYLE_REFERENCE_SOURCE` is one variable only:
-  - URL: `https://...`
-  - Local path: `assets/style-reference.png`
-- `LOG_LEVEL`: `error | warn | info | debug`
-- `LOG_REQUEST_BODY=true` 会输出请求体摘要（不是完整大包）
+- `GEMINI_ENDPOINT` must be a full Gemini API endpoint to `:generateContent`.
+- Correct: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}`
+- Wrong: `https://apiexample.ai`
+- `STYLE_REFERENCE_SOURCE` supports one value only:
+- URL mode: `https://...`
+- Local path mode: `assets/style-reference.png`
+- This proxy handles both `stream=true/false` from downstream and rewrites internally.
 
 ## Zeabur
 
@@ -62,9 +64,9 @@ Notes:
 3. Start command: `npm start`
 4. Add env vars above.
 5. Add persistent volume mount path: `/data`
-6. Use:
-   - `OUTPUT_DIR=/data/generated`
-   - `STYLE_REFERENCE_CACHE_DIR=/data/style-reference-cache`
+6. Set:
+7. `OUTPUT_DIR=/data/generated`
+8. `STYLE_REFERENCE_CACHE_DIR=/data/style-reference-cache`
 
 ## API Auth
 
@@ -81,8 +83,15 @@ curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
   -H "Authorization: Bearer CHANGE_ME_TO_A_STRONG_KEY" \
   -d '{
     "model": "gpt-4o-mini",
+    "stream": true,
     "messages": [
       {"role": "user", "content": "A cinematic portrait of a cyberpunk cat in neon rain"}
     ]
   }'
+```
+
+Response `choices[0].message.content` is Markdown image:
+
+```md
+![generated image](https://your-app.zeabur.app/download/xxxx.png)
 ```

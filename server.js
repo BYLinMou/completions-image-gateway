@@ -325,6 +325,12 @@ function maskApiKeyInUrl(url) {
   return url.replace(/([?&]key=)[^&]+/i, "$1***");
 }
 
+function toSnippet(value, maxLength = 240) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
+}
+
 async function resolveStyleReferenceFromUrl(sourceUrl) {
   const hasCache =
     fs.existsSync(styleReferenceCacheFilePath) &&
@@ -509,14 +515,40 @@ async function generateImageFromGemini(prompt) {
   });
 
   logInfo("Gemini upstream responded", {
-    status_code: response.status
+    status_code: response.status,
+    content_type: response.headers.get("content-type") || ""
   });
 
-  const data = await response.json();
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  const rawBody = await response.text();
+
+  let data = null;
+  if (contentType.includes("application/json")) {
+    try {
+      data = JSON.parse(rawBody);
+    } catch (_error) {
+      throw new Error(
+        `Upstream returned invalid JSON. status=${response.status} content_type=${contentType} body=${toSnippet(
+          rawBody
+        )}`
+      );
+    }
+  } else {
+    try {
+      data = JSON.parse(rawBody);
+    } catch (_error) {
+      throw new Error(
+        `Upstream returned non-JSON response. status=${response.status} content_type=${contentType || "unknown"} body=${toSnippet(
+          rawBody
+        )}`
+      );
+    }
+  }
+
   if (!response.ok) {
-    const message =
-      data?.error?.message ||
-      `Gemini request failed with status ${response.status}`;
+    const message = data?.error?.message
+      ? `Gemini request failed. status=${response.status} message=${data.error.message}`
+      : `Gemini request failed. status=${response.status} body=${toSnippet(rawBody)}`;
     throw new Error(message);
   }
 
@@ -535,6 +567,7 @@ async function generateImageFromGemini(prompt) {
 app.post("/v1/chat/completions", async (req, res) => {
   try {
     const { model, messages } = req.body || {};
+
     const prompt = extractPrompt(messages);
 
     if (!prompt) {
@@ -563,6 +596,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     });
 
     const url = `${BASE_URL}/download/${fileName}`;
+    const markdownImage = `![generated image](${url})`;
     const created = Math.floor(Date.now() / 1000);
 
     return res.json({
@@ -576,7 +610,7 @@ app.post("/v1/chat/completions", async (req, res) => {
           finish_reason: "stop",
           message: {
             role: "assistant",
-            content: url
+            content: markdownImage
           }
         }
       ],
