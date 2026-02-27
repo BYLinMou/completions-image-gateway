@@ -38,6 +38,8 @@ const STYLE_REFERENCE_TIMEOUT_MS = parsePositiveInt(
 const STYLE_NOTICE =
   process.env.STYLE_NOTICE ||
   "The reference image is STYLE-ONLY. Use it only for overall visual style (palette, lighting, brushwork, composition, mood). It is NOT a person/identity reference. Do not copy face, identity, body, age, gender, or character-specific traits.";
+const LOG_LEVEL = normalizeLogLevel(process.env.LOG_LEVEL || "info");
+const LOG_REQUEST_BODY = parseBoolean(process.env.LOG_REQUEST_BODY, false);
 
 const outputDirAbsPath = path.resolve(process.cwd(), OUTPUT_DIR);
 const styleReferenceCacheAbsPath = path.resolve(process.cwd(), STYLE_REFERENCE_CACHE_DIR);
@@ -62,6 +64,39 @@ if (REQUIRE_API_KEY && !API_KEY) {
   throw new Error("REQUIRE_API_KEY is true but API_KEY is empty. Set API_KEY in .env");
 }
 
+app.use((req, res, next) => {
+  const requestId = uuidv4().slice(0, 8);
+  const startAt = Date.now();
+  req.requestId = requestId;
+  res.setHeader("x-request-id", requestId);
+
+  logInfo("HTTP request started", {
+    request_id: requestId,
+    method: req.method,
+    path: req.originalUrl,
+    ip: req.ip
+  });
+
+  if (LOG_REQUEST_BODY && req.body && Object.keys(req.body).length > 0) {
+    logDebug("HTTP request body", {
+      request_id: requestId,
+      body: summarizeBody(req.body)
+    });
+  }
+
+  res.on("finish", () => {
+    logInfo("HTTP request finished", {
+      request_id: requestId,
+      method: req.method,
+      path: req.originalUrl,
+      status_code: res.statusCode,
+      duration_ms: Date.now() - startAt
+    });
+  });
+
+  return next();
+});
+
 app.use("/generated", express.static(outputDirAbsPath));
 
 app.get("/download/:filename", (req, res) => {
@@ -70,6 +105,10 @@ app.get("/download/:filename", (req, res) => {
     !filePath.startsWith(`${outputDirAbsPath}${path.sep}`) ||
     !fs.existsSync(filePath)
   ) {
+    logWarn("Download file not found", {
+      request_id: req.requestId,
+      file_path: filePath
+    });
     return res.status(404).json({
       error: {
         message: "File not found",
@@ -88,6 +127,82 @@ function parseBoolean(value, defaultValue = false) {
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return defaultValue;
+}
+
+function normalizeLogLevel(value) {
+  const normalized = String(value || "info").trim().toLowerCase();
+  if (["error", "warn", "info", "debug"].includes(normalized)) {
+    return normalized;
+  }
+  return "info";
+}
+
+function shouldLog(level) {
+  const weight = { error: 0, warn: 1, info: 2, debug: 3 };
+  return weight[level] <= weight[LOG_LEVEL];
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (_error) {
+    return JSON.stringify({ message: "failed_to_serialize_log_payload" });
+  }
+}
+
+function log(level, message, meta = {}) {
+  if (!shouldLog(level)) return;
+  const payload = {
+    ts: new Date().toISOString(),
+    level,
+    message,
+    ...meta
+  };
+  const line = safeJson(payload);
+  if (level === "error") {
+    console.error(line);
+    return;
+  }
+  if (level === "warn") {
+    console.warn(line);
+    return;
+  }
+  console.log(line);
+}
+
+function logDebug(message, meta = {}) {
+  log("debug", message, meta);
+}
+
+function logInfo(message, meta = {}) {
+  log("info", message, meta);
+}
+
+function logWarn(message, meta = {}) {
+  log("warn", message, meta);
+}
+
+function logError(message, meta = {}) {
+  log("error", message, meta);
+}
+
+function summarizeBody(body) {
+  if (!body || typeof body !== "object") return body;
+  const summary = {
+    keys: Object.keys(body)
+  };
+  if (typeof body.model === "string") {
+    summary.model = body.model;
+  }
+  if (Array.isArray(body.messages)) {
+    summary.messages_count = body.messages.length;
+    summary.messages = body.messages.map((m, idx) => ({
+      index: idx,
+      role: m?.role,
+      content_type: Array.isArray(m?.content) ? "array" : typeof m?.content
+    }));
+  }
+  return summary;
 }
 
 function parsePositiveInt(value, defaultValue) {
@@ -115,6 +230,11 @@ function requireApiKey(req, res, next) {
   const providedKey = bearerToken || xApiKey;
 
   if (providedKey !== API_KEY) {
+    logWarn("API key authentication failed", {
+      request_id: req.requestId,
+      has_bearer: Boolean(bearerToken),
+      has_x_api_key: Boolean(xApiKey)
+    });
     return res.status(401).json({
       error: {
         message:
@@ -200,6 +320,11 @@ function buildGeminiEndpoint() {
   )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 }
 
+function maskApiKeyInUrl(url) {
+  if (typeof url !== "string") return "";
+  return url.replace(/([?&]key=)[^&]+/i, "$1***");
+}
+
 async function resolveStyleReferenceFromUrl(sourceUrl) {
   const hasCache =
     fs.existsSync(styleReferenceCacheFilePath) &&
@@ -209,6 +334,10 @@ async function resolveStyleReferenceFromUrl(sourceUrl) {
     try {
       const meta = JSON.parse(fs.readFileSync(styleReferenceCacheMetaPath, "utf8"));
       if (meta && meta.sourceUrl === sourceUrl) {
+        logDebug("Style reference cache hit", {
+          source_url: sourceUrl,
+          cache_file: styleReferenceCacheFilePath
+        });
         return {
           filePath: styleReferenceCacheFilePath,
           mimeType: normalizeMimeType(meta.mimeType)
@@ -220,6 +349,9 @@ async function resolveStyleReferenceFromUrl(sourceUrl) {
   }
 
   if (styleReferenceDownloadPromise) {
+    logDebug("Style reference download in progress, awaiting existing promise", {
+      source_url: sourceUrl
+    });
     return styleReferenceDownloadPromise;
   }
 
@@ -230,6 +362,10 @@ async function resolveStyleReferenceFromUrl(sourceUrl) {
     }, STYLE_REFERENCE_TIMEOUT_MS);
 
     try {
+      logInfo("Downloading style reference image", {
+        source_url: sourceUrl,
+        timeout_ms: STYLE_REFERENCE_TIMEOUT_MS
+      });
       const response = await fetch(sourceUrl, {
         method: "GET",
         signal: controller.signal
@@ -262,6 +398,13 @@ async function resolveStyleReferenceFromUrl(sourceUrl) {
         )
       );
 
+      logInfo("Style reference image cached", {
+        source_url: sourceUrl,
+        cache_file: styleReferenceCacheFilePath,
+        size_bytes: fileBuffer.length,
+        mime_type: mimeType || "unknown"
+      });
+
       return {
         filePath: styleReferenceCacheFilePath,
         mimeType
@@ -287,10 +430,16 @@ async function loadStyleReferenceInlineData() {
   let sourceMimeType = "";
 
   if (isHttpUrl(STYLE_REFERENCE_SOURCE)) {
+    logDebug("Using URL style reference source", {
+      source: STYLE_REFERENCE_SOURCE
+    });
     const downloaded = await resolveStyleReferenceFromUrl(STYLE_REFERENCE_SOURCE);
     sourceFilePath = downloaded.filePath;
     sourceMimeType = downloaded.mimeType;
   } else {
+    logDebug("Using local style reference source", {
+      source: STYLE_REFERENCE_SOURCE
+    });
     sourceFilePath = path.resolve(process.cwd(), STYLE_REFERENCE_SOURCE);
     sourceMimeType = inferMimeTypeFromFilePath(sourceFilePath);
   }
@@ -328,6 +477,10 @@ async function generateImageFromGemini(prompt) {
   }
 
   const endpoint = buildGeminiEndpoint();
+  logInfo("Calling Gemini upstream", {
+    endpoint: maskApiKeyInUrl(endpoint),
+    model: GEMINI_MODEL
+  });
 
   const styleReferencePart = await loadStyleReferenceInlineData();
   const requestParts = [{ text: prompt }];
@@ -353,6 +506,10 @@ async function generateImageFromGemini(prompt) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify(payload)
+  });
+
+  logInfo("Gemini upstream responded", {
+    status_code: response.status
   });
 
   const data = await response.json();
@@ -381,6 +538,9 @@ app.post("/v1/chat/completions", async (req, res) => {
     const prompt = extractPrompt(messages);
 
     if (!prompt) {
+      logWarn("Prompt extraction failed", {
+        request_id: req.requestId
+      });
       return res.status(400).json({
         error: {
           message: "Invalid request: unable to extract user prompt from messages",
@@ -396,6 +556,11 @@ app.post("/v1/chat/completions", async (req, res) => {
     const filePath = path.join(outputDirAbsPath, fileName);
 
     fs.writeFileSync(filePath, Buffer.from(image.base64Data, "base64"));
+    logInfo("Generated image saved", {
+      request_id: req.requestId,
+      file_path: filePath,
+      mime_type: image.mimeType
+    });
 
     const url = `${BASE_URL}/download/${fileName}`;
     const created = Math.floor(Date.now() / 1000);
@@ -422,6 +587,11 @@ app.post("/v1/chat/completions", async (req, res) => {
       }
     });
   } catch (error) {
+    logError("Chat completion request failed", {
+      request_id: req.requestId,
+      error_message: error?.message || "unknown_error",
+      stack: error?.stack || ""
+    });
     return res.status(500).json({
       error: {
         message: error.message || "Unexpected server error",
@@ -436,5 +606,24 @@ app.get("/health", (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`GenImage proxy listening on http://localhost:${PORT}`);
+  logInfo("GenImage proxy started", {
+    port: PORT,
+    base_url: BASE_URL,
+    log_level: LOG_LEVEL,
+    require_api_key: REQUIRE_API_KEY,
+    style_reference_enabled: ENABLE_STYLE_REFERENCE
+  });
+});
+
+process.on("unhandledRejection", (reason) => {
+  logError("Unhandled promise rejection", {
+    reason: reason instanceof Error ? reason.stack || reason.message : String(reason)
+  });
+});
+
+process.on("uncaughtException", (error) => {
+  logError("Uncaught exception", {
+    error_message: error?.message || "unknown_error",
+    stack: error?.stack || ""
+  });
 });

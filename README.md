@@ -39,6 +39,9 @@ STYLE_REFERENCE_MIME_TYPE=
 
 APPEND_STYLE_NOTICE=true
 STYLE_NOTICE=The reference image is STYLE-ONLY and NOT a person/identity reference. Use it only for palette, lighting, brushwork, composition, and mood. Do not copy face, identity, body, age, gender, or character-specific traits.
+
+LOG_LEVEL=info
+LOG_REQUEST_BODY=false
 ```
 
 Notes:
@@ -49,6 +52,8 @@ Notes:
 - `STYLE_REFERENCE_SOURCE` is one variable only:
   - URL: `https://...`
   - Local path: `assets/style-reference.png`
+- `LOG_LEVEL`: `error | warn | info | debug`
+- `LOG_REQUEST_BODY=true` 会输出请求体摘要（不是完整大包）
 
 ## Zeabur
 
