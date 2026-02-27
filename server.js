@@ -12,6 +12,16 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL =
   process.env.GEMINI_MODEL || "gemini-2.0-flash-exp-image-generation";
 const GEMINI_ENDPOINT = process.env.GEMINI_ENDPOINT || "";
+const SUPPORTED_GEMINI_IMAGE_ASPECT_RATIOS = new Set([
+  "1:1",
+  "3:4",
+  "4:3",
+  "9:16",
+  "16:9"
+]);
+const GEMINI_IMAGE_ASPECT_RATIO = normalizeGeminiImageAspectRatio(
+  process.env.GEMINI_IMAGE_ASPECT_RATIO || "1:1"
+);
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const OUTPUT_DIR = process.env.OUTPUT_DIR || "generated";
 
@@ -210,6 +220,18 @@ function parsePositiveInt(value, defaultValue) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
   return parsed;
+}
+
+function normalizeGeminiImageAspectRatio(value) {
+  const normalized = String(value || "").trim();
+  if (!SUPPORTED_GEMINI_IMAGE_ASPECT_RATIOS.has(normalized)) {
+    throw new Error(
+      `Invalid GEMINI_IMAGE_ASPECT_RATIO "${normalized}". Supported values: ${Array.from(
+        SUPPORTED_GEMINI_IMAGE_ASPECT_RATIOS
+      ).join(", ")}`
+    );
+  }
+  return normalized;
 }
 
 function isStreamRequested(value) {
@@ -523,7 +545,8 @@ async function generateImageFromGemini(prompt) {
   const endpoint = buildGeminiEndpoint();
   logInfo("Calling Gemini upstream", {
     endpoint: maskApiKeyInUrl(endpoint),
-    model: GEMINI_MODEL
+    model: GEMINI_MODEL,
+    image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO
   });
 
   const styleReferencePart = await loadStyleReferenceInlineData();
@@ -540,7 +563,10 @@ async function generateImageFromGemini(prompt) {
       }
     ],
     generationConfig: {
-      responseModalities: ["TEXT", "IMAGE"]
+      responseModalities: ["TEXT", "IMAGE"],
+      imageConfig: {
+        aspectRatio: GEMINI_IMAGE_ASPECT_RATIO
+      }
     }
   };
 
@@ -785,7 +811,8 @@ app.listen(PORT, () => {
     base_url: BASE_URL,
     log_level: LOG_LEVEL,
     require_api_key: REQUIRE_API_KEY,
-    style_reference_enabled: ENABLE_STYLE_REFERENCE
+    style_reference_enabled: ENABLE_STYLE_REFERENCE,
+    gemini_image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO
   });
 });
 

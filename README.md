@@ -28,6 +28,7 @@ API_KEY=CHANGE_ME_TO_A_STRONG_KEY
 
 GEMINI_API_KEY=YOUR_GEMINI_API_KEY
 GEMINI_MODEL=gemini-2.0-flash-exp-image-generation
+GEMINI_IMAGE_ASPECT_RATIO=1:1
 GEMINI_ENDPOINT=
 
 ENABLE_STYLE_REFERENCE=true
@@ -51,12 +52,35 @@ STREAM_CHUNK_SIZE=120
 - `GEMINI_ENDPOINT` placeholders: `{model}` and `{api_key}`.
 - If `GEMINI_ENDPOINT` has no `key=` and no `{api_key}`, service appends `?key=...` automatically.
 - `GEMINI_ENDPOINT` must be a full Gemini API endpoint to `:generateContent`.
+- `GEMINI_IMAGE_ASPECT_RATIO` controls generated image ratio. Default: `1:1`. Supported values: `1:1`, `3:4`, `4:3`, `9:16`, `16:9`.
 - Correct: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}`
 - Wrong: `https://apiexample.ai`
 - `STYLE_REFERENCE_SOURCE` supports one value only:
 - URL mode: `https://...`
 - Local path mode: `assets/style-reference.png`
 - This proxy handles both `stream=true/false` from downstream and rewrites internally.
+
+## Aspect Ratio Examples
+
+Set this in `.env`:
+
+```env
+# Square (default)
+GEMINI_IMAGE_ASPECT_RATIO=1:1
+
+# Portrait
+# GEMINI_IMAGE_ASPECT_RATIO=3:4
+# GEMINI_IMAGE_ASPECT_RATIO=9:16
+
+# Landscape
+# GEMINI_IMAGE_ASPECT_RATIO=4:3
+# GEMINI_IMAGE_ASPECT_RATIO=16:9
+```
+
+Tips:
+- Social avatar/product thumbnail: `1:1`
+- Poster/phone wallpaper: `9:16`
+- Slide/desktop visual: `16:9`
 
 ## Zeabur
 
