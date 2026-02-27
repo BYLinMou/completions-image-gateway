@@ -9,51 +9,34 @@ app.use(express.json({ limit: "20mb" }));
 
 const PORT = Number(process.env.PORT || 3000);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const UPSTREAM_GEMINI_MODEL =
-  process.env.UPSTREAM_GEMINI_MODEL ||
-  process.env.GEMINI_MODEL ||
-  "gemini-2.0-flash-exp-image-generation";
-const UPSTREAM_GEMINI_URL = process.env.UPSTREAM_GEMINI_URL || "";
-const UPSTREAM_GEMINI_BASE_URL = (
-  process.env.UPSTREAM_GEMINI_BASE_URL ||
-  "https://generativelanguage.googleapis.com"
-).replace(/\/+$/, "");
-const UPSTREAM_GEMINI_API_VERSION =
-  process.env.UPSTREAM_GEMINI_API_VERSION || "v1beta";
-const UPSTREAM_GEMINI_API_KEY =
-  process.env.UPSTREAM_GEMINI_API_KEY || GEMINI_API_KEY;
+const GEMINI_MODEL =
+  process.env.GEMINI_MODEL || "gemini-2.0-flash-exp-image-generation";
+const GEMINI_ENDPOINT = process.env.GEMINI_ENDPOINT || "";
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const OUTPUT_DIR = process.env.OUTPUT_DIR || "generated";
 
-const REQUIRE_SERVICE_API_KEY = parseBoolean(
-  process.env.REQUIRE_SERVICE_API_KEY,
-  true
-);
-const SERVICE_API_KEY = process.env.SERVICE_API_KEY || "";
+const REQUIRE_API_KEY = parseBoolean(process.env.REQUIRE_API_KEY, true);
+const API_KEY = process.env.API_KEY || "";
 
 const ENABLE_STYLE_REFERENCE = parseBoolean(
   process.env.ENABLE_STYLE_REFERENCE,
   false
 );
-const STYLE_REFERENCE_IMAGE_PATH = process.env.STYLE_REFERENCE_IMAGE_PATH || "";
+const STYLE_REFERENCE_SOURCE = process.env.STYLE_REFERENCE_SOURCE || "";
 const STYLE_REFERENCE_MIME_TYPE = process.env.STYLE_REFERENCE_MIME_TYPE || "";
-const APPEND_STYLE_REFERENCE_NOTICE = parseBoolean(
-  process.env.APPEND_STYLE_REFERENCE_NOTICE,
-  true
-);
-const STYLE_REFERENCE_IMAGE_URL = process.env.STYLE_REFERENCE_IMAGE_URL || "";
+const APPEND_STYLE_NOTICE = parseBoolean(process.env.APPEND_STYLE_NOTICE, true);
 const STYLE_REFERENCE_CACHE_DIR =
   process.env.STYLE_REFERENCE_CACHE_DIR || "style-reference-cache";
-const STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST = parseBoolean(
-  process.env.STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST,
+const STYLE_REFERENCE_REFRESH = parseBoolean(
+  process.env.STYLE_REFERENCE_REFRESH,
   false
 );
-const STYLE_REFERENCE_DOWNLOAD_TIMEOUT_MS = parsePositiveInt(
-  process.env.STYLE_REFERENCE_DOWNLOAD_TIMEOUT_MS,
+const STYLE_REFERENCE_TIMEOUT_MS = parsePositiveInt(
+  process.env.STYLE_REFERENCE_TIMEOUT_MS,
   15000
 );
-const STYLE_REFERENCE_NOTICE =
-  process.env.STYLE_REFERENCE_NOTICE ||
+const STYLE_NOTICE =
+  process.env.STYLE_NOTICE ||
   "The reference image is STYLE-ONLY. Use it only for overall visual style (palette, lighting, brushwork, composition, mood). It is NOT a person/identity reference. Do not copy face, identity, body, age, gender, or character-specific traits.";
 
 const outputDirAbsPath = path.resolve(process.cwd(), OUTPUT_DIR);
@@ -75,10 +58,8 @@ const styleReferenceCacheMetaPath = path.join(
 );
 let styleReferenceDownloadPromise = null;
 
-if (REQUIRE_SERVICE_API_KEY && !SERVICE_API_KEY) {
-  throw new Error(
-    "REQUIRE_SERVICE_API_KEY is true but SERVICE_API_KEY is empty. Set SERVICE_API_KEY in .env"
-  );
+if (REQUIRE_API_KEY && !API_KEY) {
+  throw new Error("REQUIRE_API_KEY is true but API_KEY is empty. Set API_KEY in .env");
 }
 
 app.use("/generated", express.static(outputDirAbsPath));
@@ -124,7 +105,7 @@ function extractBearerToken(authHeader) {
 }
 
 function requireApiKey(req, res, next) {
-  if (!REQUIRE_SERVICE_API_KEY) {
+  if (!REQUIRE_API_KEY) {
     return next();
   }
 
@@ -133,11 +114,11 @@ function requireApiKey(req, res, next) {
     typeof req.headers["x-api-key"] === "string" ? req.headers["x-api-key"] : "";
   const providedKey = bearerToken || xApiKey;
 
-  if (providedKey !== SERVICE_API_KEY) {
+  if (providedKey !== API_KEY) {
     return res.status(401).json({
       error: {
         message:
-          "Unauthorized: invalid API key. Use Authorization: Bearer YOUR_SERVICE_API_KEY or x-api-key.",
+          "Unauthorized: invalid API key. Use Authorization: Bearer YOUR_API_KEY or x-api-key.",
         type: "invalid_request_error",
         code: "invalid_api_key"
       }
@@ -189,42 +170,45 @@ function normalizeMimeType(value) {
   return value.split(";")[0].trim().toLowerCase();
 }
 
+function isHttpUrl(value) {
+  return /^https?:\/\//i.test(value);
+}
+
 function buildPromptForGemini(userPrompt) {
-  if (!APPEND_STYLE_REFERENCE_NOTICE) return userPrompt;
-  return `${userPrompt}\n\n${STYLE_REFERENCE_NOTICE}`;
+  if (!APPEND_STYLE_NOTICE) return userPrompt;
+  return `${userPrompt}\n\n${STYLE_NOTICE}`;
 }
 
 function buildGeminiEndpoint() {
-  if (UPSTREAM_GEMINI_URL) {
-    const hadApiKeyPlaceholder = UPSTREAM_GEMINI_URL.includes("{api_key}");
-    let endpoint = UPSTREAM_GEMINI_URL
-      .replace(/\{model\}/g, encodeURIComponent(UPSTREAM_GEMINI_MODEL))
-      .replace(/\{api_version\}/g, encodeURIComponent(UPSTREAM_GEMINI_API_VERSION))
-      .replace(/\{api_key\}/g, encodeURIComponent(UPSTREAM_GEMINI_API_KEY));
+  if (GEMINI_ENDPOINT) {
+    const hadApiKeyPlaceholder = GEMINI_ENDPOINT.includes("{api_key}");
+    let endpoint = GEMINI_ENDPOINT
+      .replace(/\{model\}/g, encodeURIComponent(GEMINI_MODEL))
+      .replace(/\{api_key\}/g, encodeURIComponent(GEMINI_API_KEY));
 
     if (!hadApiKeyPlaceholder && !/[?&]key=/.test(endpoint)) {
       const separator = endpoint.includes("?") ? "&" : "?";
       endpoint = `${endpoint}${separator}key=${encodeURIComponent(
-        UPSTREAM_GEMINI_API_KEY
+        GEMINI_API_KEY
       )}`;
     }
     return endpoint;
   }
 
-  return `${UPSTREAM_GEMINI_BASE_URL}/${UPSTREAM_GEMINI_API_VERSION}/models/${encodeURIComponent(
-    UPSTREAM_GEMINI_MODEL
-  )}:generateContent?key=${encodeURIComponent(UPSTREAM_GEMINI_API_KEY)}`;
+  return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    GEMINI_MODEL
+  )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 }
 
-async function resolveStyleReferenceFromUrl() {
+async function resolveStyleReferenceFromUrl(sourceUrl) {
   const hasCache =
     fs.existsSync(styleReferenceCacheFilePath) &&
     fs.existsSync(styleReferenceCacheMetaPath);
 
-  if (!STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST && hasCache) {
+  if (!STYLE_REFERENCE_REFRESH && hasCache) {
     try {
       const meta = JSON.parse(fs.readFileSync(styleReferenceCacheMetaPath, "utf8"));
-      if (meta && meta.sourceUrl === STYLE_REFERENCE_IMAGE_URL) {
+      if (meta && meta.sourceUrl === sourceUrl) {
         return {
           filePath: styleReferenceCacheFilePath,
           mimeType: normalizeMimeType(meta.mimeType)
@@ -243,17 +227,17 @@ async function resolveStyleReferenceFromUrl() {
     const controller = new AbortController();
     const timeout = setTimeout(() => {
       controller.abort();
-    }, STYLE_REFERENCE_DOWNLOAD_TIMEOUT_MS);
+    }, STYLE_REFERENCE_TIMEOUT_MS);
 
     try {
-      const response = await fetch(STYLE_REFERENCE_IMAGE_URL, {
+      const response = await fetch(sourceUrl, {
         method: "GET",
         signal: controller.signal
       });
 
       if (!response.ok) {
         throw new Error(
-          `Failed to download STYLE_REFERENCE_IMAGE_URL, status ${response.status}`
+          `Failed to download style reference URL, status ${response.status}`
         );
       }
 
@@ -269,7 +253,7 @@ async function resolveStyleReferenceFromUrl() {
         styleReferenceCacheMetaPath,
         JSON.stringify(
           {
-            sourceUrl: STYLE_REFERENCE_IMAGE_URL,
+            sourceUrl,
             mimeType,
             updatedAt: new Date().toISOString()
           },
@@ -293,21 +277,21 @@ async function resolveStyleReferenceFromUrl() {
 
 async function loadStyleReferenceInlineData() {
   if (!ENABLE_STYLE_REFERENCE) return null;
-  if (!STYLE_REFERENCE_IMAGE_URL && !STYLE_REFERENCE_IMAGE_PATH) {
+  if (!STYLE_REFERENCE_SOURCE) {
     throw new Error(
-      "ENABLE_STYLE_REFERENCE is true but neither STYLE_REFERENCE_IMAGE_URL nor STYLE_REFERENCE_IMAGE_PATH is set"
+      "ENABLE_STYLE_REFERENCE is true but STYLE_REFERENCE_SOURCE is empty"
     );
   }
 
   let sourceFilePath = "";
   let sourceMimeType = "";
 
-  if (STYLE_REFERENCE_IMAGE_URL) {
-    const downloaded = await resolveStyleReferenceFromUrl();
+  if (isHttpUrl(STYLE_REFERENCE_SOURCE)) {
+    const downloaded = await resolveStyleReferenceFromUrl(STYLE_REFERENCE_SOURCE);
     sourceFilePath = downloaded.filePath;
     sourceMimeType = downloaded.mimeType;
   } else {
-    sourceFilePath = path.resolve(process.cwd(), STYLE_REFERENCE_IMAGE_PATH);
+    sourceFilePath = path.resolve(process.cwd(), STYLE_REFERENCE_SOURCE);
     sourceMimeType = inferMimeTypeFromFilePath(sourceFilePath);
   }
 
@@ -339,10 +323,8 @@ async function loadStyleReferenceInlineData() {
 }
 
 async function generateImageFromGemini(prompt) {
-  if (!UPSTREAM_GEMINI_API_KEY) {
-    throw new Error(
-      "Missing UPSTREAM_GEMINI_API_KEY in .env (or set GEMINI_API_KEY for backward compatibility)"
-    );
+  if (!GEMINI_API_KEY) {
+    throw new Error("Missing GEMINI_API_KEY in .env");
   }
 
   const endpoint = buildGeminiEndpoint();
