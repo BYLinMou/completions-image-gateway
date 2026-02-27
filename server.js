@@ -8,32 +8,87 @@ const app = express();
 app.use(express.json({ limit: "20mb" }));
 
 const PORT = Number(process.env.PORT || 3000);
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL =
-  process.env.GEMINI_MODEL || "gemini-2.0-flash-exp-image-generation";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const UPSTREAM_GEMINI_MODEL =
+  process.env.UPSTREAM_GEMINI_MODEL ||
+  process.env.GEMINI_MODEL ||
+  "gemini-2.0-flash-exp-image-generation";
+const UPSTREAM_GEMINI_URL = process.env.UPSTREAM_GEMINI_URL || "";
+const UPSTREAM_GEMINI_BASE_URL = (
+  process.env.UPSTREAM_GEMINI_BASE_URL ||
+  "https://generativelanguage.googleapis.com"
+).replace(/\/+$/, "");
+const UPSTREAM_GEMINI_API_VERSION =
+  process.env.UPSTREAM_GEMINI_API_VERSION || "v1beta";
+const UPSTREAM_GEMINI_API_KEY =
+  process.env.UPSTREAM_GEMINI_API_KEY || GEMINI_API_KEY;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const OUTPUT_DIR = process.env.OUTPUT_DIR || "generated";
-const ENABLE_STYLE_REFERENCE = parseBoolean(process.env.ENABLE_STYLE_REFERENCE, false);
+
+const REQUIRE_SERVICE_API_KEY = parseBoolean(
+  process.env.REQUIRE_SERVICE_API_KEY,
+  true
+);
+const SERVICE_API_KEY = process.env.SERVICE_API_KEY || "";
+
+const ENABLE_STYLE_REFERENCE = parseBoolean(
+  process.env.ENABLE_STYLE_REFERENCE,
+  false
+);
 const STYLE_REFERENCE_IMAGE_PATH = process.env.STYLE_REFERENCE_IMAGE_PATH || "";
 const STYLE_REFERENCE_MIME_TYPE = process.env.STYLE_REFERENCE_MIME_TYPE || "";
 const APPEND_STYLE_REFERENCE_NOTICE = parseBoolean(
   process.env.APPEND_STYLE_REFERENCE_NOTICE,
   true
 );
+const STYLE_REFERENCE_IMAGE_URL = process.env.STYLE_REFERENCE_IMAGE_URL || "";
+const STYLE_REFERENCE_CACHE_DIR =
+  process.env.STYLE_REFERENCE_CACHE_DIR || "style-reference-cache";
+const STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST = parseBoolean(
+  process.env.STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST,
+  false
+);
+const STYLE_REFERENCE_DOWNLOAD_TIMEOUT_MS = parsePositiveInt(
+  process.env.STYLE_REFERENCE_DOWNLOAD_TIMEOUT_MS,
+  15000
+);
 const STYLE_REFERENCE_NOTICE =
   process.env.STYLE_REFERENCE_NOTICE ||
-  "以下参考图仅用于整体视觉风格参考（例如配色、光影、笔触、构图与氛围），不是人物形象参考图，不用于复制人物身份、五官、体型、年龄、性别或具体角色特征。";
+  "The reference image is STYLE-ONLY. Use it only for overall visual style (palette, lighting, brushwork, composition, mood). It is NOT a person/identity reference. Do not copy face, identity, body, age, gender, or character-specific traits.";
 
 const outputDirAbsPath = path.resolve(process.cwd(), OUTPUT_DIR);
+const styleReferenceCacheAbsPath = path.resolve(process.cwd(), STYLE_REFERENCE_CACHE_DIR);
 if (!fs.existsSync(outputDirAbsPath)) {
   fs.mkdirSync(outputDirAbsPath, { recursive: true });
+}
+if (!fs.existsSync(styleReferenceCacheAbsPath)) {
+  fs.mkdirSync(styleReferenceCacheAbsPath, { recursive: true });
+}
+
+const styleReferenceCacheFilePath = path.join(
+  styleReferenceCacheAbsPath,
+  "style-reference.bin"
+);
+const styleReferenceCacheMetaPath = path.join(
+  styleReferenceCacheAbsPath,
+  "style-reference-meta.json"
+);
+let styleReferenceDownloadPromise = null;
+
+if (REQUIRE_SERVICE_API_KEY && !SERVICE_API_KEY) {
+  throw new Error(
+    "REQUIRE_SERVICE_API_KEY is true but SERVICE_API_KEY is empty. Set SERVICE_API_KEY in .env"
+  );
 }
 
 app.use("/generated", express.static(outputDirAbsPath));
 
 app.get("/download/:filename", (req, res) => {
-  const filePath = path.join(outputDirAbsPath, req.params.filename);
-  if (!filePath.startsWith(outputDirAbsPath) || !fs.existsSync(filePath)) {
+  const filePath = path.resolve(outputDirAbsPath, req.params.filename);
+  if (
+    !filePath.startsWith(`${outputDirAbsPath}${path.sep}`) ||
+    !fs.existsSync(filePath)
+  ) {
     return res.status(404).json({
       error: {
         message: "File not found",
@@ -44,6 +99,8 @@ app.get("/download/:filename", (req, res) => {
   return res.download(filePath);
 });
 
+app.use("/v1", requireApiKey);
+
 function parseBoolean(value, defaultValue = false) {
   if (typeof value !== "string") return defaultValue;
   const normalized = value.trim().toLowerCase();
@@ -52,12 +109,49 @@ function parseBoolean(value, defaultValue = false) {
   return defaultValue;
 }
 
+function parsePositiveInt(value, defaultValue) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
+  return parsed;
+}
+
+function extractBearerToken(authHeader) {
+  if (typeof authHeader !== "string") return "";
+  const [scheme, token] = authHeader.trim().split(/\s+/, 2);
+  if (!scheme || !token) return "";
+  if (scheme.toLowerCase() !== "bearer") return "";
+  return token;
+}
+
+function requireApiKey(req, res, next) {
+  if (!REQUIRE_SERVICE_API_KEY) {
+    return next();
+  }
+
+  const bearerToken = extractBearerToken(req.headers.authorization);
+  const xApiKey =
+    typeof req.headers["x-api-key"] === "string" ? req.headers["x-api-key"] : "";
+  const providedKey = bearerToken || xApiKey;
+
+  if (providedKey !== SERVICE_API_KEY) {
+    return res.status(401).json({
+      error: {
+        message:
+          "Unauthorized: invalid API key. Use Authorization: Bearer YOUR_SERVICE_API_KEY or x-api-key.",
+        type: "invalid_request_error",
+        code: "invalid_api_key"
+      }
+    });
+  }
+
+  return next();
+}
+
 function extractPrompt(messages) {
   if (!Array.isArray(messages)) return "";
   const lastUserMessage = [...messages]
     .reverse()
     .find((m) => m && m.role === "user");
-
   if (!lastUserMessage) return "";
 
   const content = lastUserMessage.content;
@@ -90,30 +184,149 @@ function inferMimeTypeFromFilePath(filePath) {
   return "application/octet-stream";
 }
 
+function normalizeMimeType(value) {
+  if (typeof value !== "string") return "";
+  return value.split(";")[0].trim().toLowerCase();
+}
+
 function buildPromptForGemini(userPrompt) {
   if (!APPEND_STYLE_REFERENCE_NOTICE) return userPrompt;
   return `${userPrompt}\n\n${STYLE_REFERENCE_NOTICE}`;
 }
 
-function loadStyleReferenceInlineData() {
+function buildGeminiEndpoint() {
+  if (UPSTREAM_GEMINI_URL) {
+    const hadApiKeyPlaceholder = UPSTREAM_GEMINI_URL.includes("{api_key}");
+    let endpoint = UPSTREAM_GEMINI_URL
+      .replace(/\{model\}/g, encodeURIComponent(UPSTREAM_GEMINI_MODEL))
+      .replace(/\{api_version\}/g, encodeURIComponent(UPSTREAM_GEMINI_API_VERSION))
+      .replace(/\{api_key\}/g, encodeURIComponent(UPSTREAM_GEMINI_API_KEY));
+
+    if (!hadApiKeyPlaceholder && !/[?&]key=/.test(endpoint)) {
+      const separator = endpoint.includes("?") ? "&" : "?";
+      endpoint = `${endpoint}${separator}key=${encodeURIComponent(
+        UPSTREAM_GEMINI_API_KEY
+      )}`;
+    }
+    return endpoint;
+  }
+
+  return `${UPSTREAM_GEMINI_BASE_URL}/${UPSTREAM_GEMINI_API_VERSION}/models/${encodeURIComponent(
+    UPSTREAM_GEMINI_MODEL
+  )}:generateContent?key=${encodeURIComponent(UPSTREAM_GEMINI_API_KEY)}`;
+}
+
+async function resolveStyleReferenceFromUrl() {
+  const hasCache =
+    fs.existsSync(styleReferenceCacheFilePath) &&
+    fs.existsSync(styleReferenceCacheMetaPath);
+
+  if (!STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST && hasCache) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(styleReferenceCacheMetaPath, "utf8"));
+      if (meta && meta.sourceUrl === STYLE_REFERENCE_IMAGE_URL) {
+        return {
+          filePath: styleReferenceCacheFilePath,
+          mimeType: normalizeMimeType(meta.mimeType)
+        };
+      }
+    } catch (_error) {
+      // Ignore broken cache metadata and re-download.
+    }
+  }
+
+  if (styleReferenceDownloadPromise) {
+    return styleReferenceDownloadPromise;
+  }
+
+  styleReferenceDownloadPromise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, STYLE_REFERENCE_DOWNLOAD_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(STYLE_REFERENCE_IMAGE_URL, {
+        method: "GET",
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          `Failed to download STYLE_REFERENCE_IMAGE_URL, status ${response.status}`
+        );
+      }
+
+      const mimeType = normalizeMimeType(response.headers.get("content-type"));
+      const arrayBuffer = await response.arrayBuffer();
+      const fileBuffer = Buffer.from(arrayBuffer);
+      if (!fileBuffer.length) {
+        throw new Error("Downloaded style reference image is empty");
+      }
+
+      fs.writeFileSync(styleReferenceCacheFilePath, fileBuffer);
+      fs.writeFileSync(
+        styleReferenceCacheMetaPath,
+        JSON.stringify(
+          {
+            sourceUrl: STYLE_REFERENCE_IMAGE_URL,
+            mimeType,
+            updatedAt: new Date().toISOString()
+          },
+          null,
+          2
+        )
+      );
+
+      return {
+        filePath: styleReferenceCacheFilePath,
+        mimeType
+      };
+    } finally {
+      clearTimeout(timeout);
+      styleReferenceDownloadPromise = null;
+    }
+  })();
+
+  return styleReferenceDownloadPromise;
+}
+
+async function loadStyleReferenceInlineData() {
   if (!ENABLE_STYLE_REFERENCE) return null;
-  if (!STYLE_REFERENCE_IMAGE_PATH) {
+  if (!STYLE_REFERENCE_IMAGE_URL && !STYLE_REFERENCE_IMAGE_PATH) {
     throw new Error(
-      "ENABLE_STYLE_REFERENCE is true but STYLE_REFERENCE_IMAGE_PATH is empty"
+      "ENABLE_STYLE_REFERENCE is true but neither STYLE_REFERENCE_IMAGE_URL nor STYLE_REFERENCE_IMAGE_PATH is set"
     );
   }
 
-  const styleImageAbsPath = path.resolve(process.cwd(), STYLE_REFERENCE_IMAGE_PATH);
-  if (!fs.existsSync(styleImageAbsPath)) {
-    throw new Error(`Style reference image not found: ${styleImageAbsPath}`);
+  let sourceFilePath = "";
+  let sourceMimeType = "";
+
+  if (STYLE_REFERENCE_IMAGE_URL) {
+    const downloaded = await resolveStyleReferenceFromUrl();
+    sourceFilePath = downloaded.filePath;
+    sourceMimeType = downloaded.mimeType;
+  } else {
+    sourceFilePath = path.resolve(process.cwd(), STYLE_REFERENCE_IMAGE_PATH);
+    sourceMimeType = inferMimeTypeFromFilePath(sourceFilePath);
   }
 
-  const fileBuffer = fs.readFileSync(styleImageAbsPath);
+  if (!fs.existsSync(sourceFilePath)) {
+    throw new Error(`Style reference image not found: ${sourceFilePath}`);
+  }
+
+  const fileBuffer = fs.readFileSync(sourceFilePath);
   const mimeType =
-    STYLE_REFERENCE_MIME_TYPE || inferMimeTypeFromFilePath(styleImageAbsPath);
+    normalizeMimeType(STYLE_REFERENCE_MIME_TYPE) || sourceMimeType || "";
+
   if (mimeType === "application/octet-stream") {
     throw new Error(
       "Unable to infer style image mime type. Set STYLE_REFERENCE_MIME_TYPE in .env"
+    );
+  }
+  if (!mimeType) {
+    throw new Error(
+      "Missing style image mime type. Set STYLE_REFERENCE_MIME_TYPE in .env"
     );
   }
 
@@ -126,15 +339,15 @@ function loadStyleReferenceInlineData() {
 }
 
 async function generateImageFromGemini(prompt) {
-  if (!GEMINI_API_KEY) {
-    throw new Error("Missing GEMINI_API_KEY in .env");
+  if (!UPSTREAM_GEMINI_API_KEY) {
+    throw new Error(
+      "Missing UPSTREAM_GEMINI_API_KEY in .env (or set GEMINI_API_KEY for backward compatibility)"
+    );
   }
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    GEMINI_MODEL
-  )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const endpoint = buildGeminiEndpoint();
 
-  const styleReferencePart = loadStyleReferenceInlineData();
+  const styleReferencePart = await loadStyleReferenceInlineData();
   const requestParts = [{ text: prompt }];
   if (styleReferencePart) {
     requestParts.push(styleReferencePart);
