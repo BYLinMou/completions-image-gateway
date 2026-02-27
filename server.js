@@ -40,6 +40,7 @@ const STYLE_NOTICE =
   "The reference image is STYLE-ONLY. Use it only for overall visual style (palette, lighting, brushwork, composition, mood). It is NOT a person/identity reference. Do not copy face, identity, body, age, gender, or character-specific traits.";
 const LOG_LEVEL = normalizeLogLevel(process.env.LOG_LEVEL || "info");
 const LOG_REQUEST_BODY = parseBoolean(process.env.LOG_REQUEST_BODY, false);
+const STREAM_CHUNK_SIZE = parsePositiveInt(process.env.STREAM_CHUNK_SIZE, 120);
 
 const outputDirAbsPath = path.resolve(process.cwd(), OUTPUT_DIR);
 const styleReferenceCacheAbsPath = path.resolve(process.cwd(), STYLE_REFERENCE_CACHE_DIR);
@@ -211,12 +212,49 @@ function parsePositiveInt(value, defaultValue) {
   return parsed;
 }
 
+function isStreamRequested(value) {
+  if (value === true || value === 1) return true;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "1";
+  }
+  return false;
+}
+
 function extractBearerToken(authHeader) {
   if (typeof authHeader !== "string") return "";
   const [scheme, token] = authHeader.trim().split(/\s+/, 2);
   if (!scheme || !token) return "";
   if (scheme.toLowerCase() !== "bearer") return "";
   return token;
+}
+
+function initializeSse(res) {
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+}
+
+function writeSseData(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function writeSseDone(res) {
+  res.write("data: [DONE]\n\n");
+}
+
+function splitIntoStreamChunks(text) {
+  const value = String(text || "");
+  if (!value) return [];
+  const chunks = [];
+  for (let i = 0; i < value.length; i += STREAM_CHUNK_SIZE) {
+    chunks.push(value.slice(i, i + STREAM_CHUNK_SIZE));
+  }
+  return chunks;
 }
 
 function requireApiKey(req, res, next) {
@@ -564,12 +602,79 @@ async function generateImageFromGemini(prompt) {
   };
 }
 
+function streamChatCompletionResponse({
+  res,
+  completionId,
+  created,
+  responseModel,
+  content
+}) {
+  writeSseData(res, {
+    id: completionId,
+    object: "chat.completion.chunk",
+    created,
+    model: responseModel,
+    choices: [
+      {
+        index: 0,
+        delta: {
+          role: "assistant"
+        },
+        finish_reason: null
+      }
+    ]
+  });
+
+  const contentChunks = splitIntoStreamChunks(content);
+  for (const chunk of contentChunks) {
+    writeSseData(res, {
+      id: completionId,
+      object: "chat.completion.chunk",
+      created,
+      model: responseModel,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            content: chunk
+          },
+          finish_reason: null
+        }
+      ]
+    });
+  }
+
+  writeSseData(res, {
+    id: completionId,
+    object: "chat.completion.chunk",
+    created,
+    model: responseModel,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: "stop"
+      }
+    ],
+    usage: {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0
+    }
+  });
+  writeSseDone(res);
+  res.end();
+}
+
 app.post("/v1/chat/completions", async (req, res) => {
+  let streamRequested = false;
   try {
-    const { model, messages } = req.body || {};
+    const { model, messages, stream } = req.body || {};
+    streamRequested = isStreamRequested(stream);
+    const responseModel = model || "gpt-4o-mini";
+    const completionId = `chatcmpl-${uuidv4()}`;
 
     const prompt = extractPrompt(messages);
-
     if (!prompt) {
       logWarn("Prompt extraction failed", {
         request_id: req.requestId
@@ -600,11 +705,27 @@ app.post("/v1/chat/completions", async (req, res) => {
     const dualImageContent = `${markdownImage}\n\n${url}`;
     const created = Math.floor(Date.now() / 1000);
 
+    if (streamRequested) {
+      logInfo("Sending streaming chat response", {
+        request_id: req.requestId,
+        completion_id: completionId
+      });
+      initializeSse(res);
+      streamChatCompletionResponse({
+        res,
+        completionId,
+        created,
+        responseModel,
+        content: dualImageContent
+      });
+      return;
+    }
+
     return res.json({
-      id: `chatcmpl-${uuidv4()}`,
+      id: completionId,
       object: "chat.completion",
       created,
-      model: model || "gpt-4o-mini",
+      model: responseModel,
       choices: [
         {
           index: 0,
@@ -627,6 +748,24 @@ app.post("/v1/chat/completions", async (req, res) => {
       error_message: error?.message || "unknown_error",
       stack: error?.stack || ""
     });
+
+    if (streamRequested) {
+      if (!res.headersSent) {
+        initializeSse(res);
+      }
+      writeSseData(res, {
+        error: {
+          message: error?.message || "Unexpected server error",
+          type: "server_error",
+          param: "",
+          code: null
+        }
+      });
+      writeSseDone(res);
+      res.end();
+      return;
+    }
+
     return res.status(500).json({
       error: {
         message: error.message || "Unexpected server error",

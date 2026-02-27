@@ -42,6 +42,7 @@ STYLE_NOTICE=The reference image is STYLE-ONLY and NOT a person/identity referen
 
 LOG_LEVEL=info
 LOG_REQUEST_BODY=false
+STREAM_CHUNK_SIZE=120
 ```
 
 ## Important Notes
@@ -64,9 +65,8 @@ LOG_REQUEST_BODY=false
 3. Start command: `npm start`
 4. Add env vars above.
 5. Add persistent volume mount path: `/data`
-6. Set:
-7. `OUTPUT_DIR=/data/generated`
-8. `STYLE_REFERENCE_CACHE_DIR=/data/style-reference-cache`
+6. Set `OUTPUT_DIR=/data/generated`
+7. Set `STYLE_REFERENCE_CACHE_DIR=/data/style-reference-cache`
 
 ## API Auth
 
@@ -97,3 +97,5 @@ Response `choices[0].message.content` includes both Markdown image and raw URL:
 
 https://your-app.zeabur.app/download/xxxx.png
 ```
+
+For `stream=true`, response is SSE in `chat.completion.chunk` format and ends with `data: [DONE]`.
