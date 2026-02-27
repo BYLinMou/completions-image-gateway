@@ -597,6 +597,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     const url = `${BASE_URL}/download/${fileName}`;
     const markdownImage = `![generated image](${url})`;
+    const dualImageContent = `${markdownImage}\n\n${url}`;
     const created = Math.floor(Date.now() / 1000);
 
     return res.json({
@@ -610,7 +611,7 @@ app.post("/v1/chat/completions", async (req, res) => {
           finish_reason: "stop",
           message: {
             role: "assistant",
-            content: markdownImage
+            content: dualImageContent
           }
         }
       ],

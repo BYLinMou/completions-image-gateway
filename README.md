@@ -90,8 +90,10 @@ curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
   }'
 ```
 
-Response `choices[0].message.content` is Markdown image:
+Response `choices[0].message.content` includes both Markdown image and raw URL:
 
 ```md
 ![generated image](https://your-app.zeabur.app/download/xxxx.png)
+
+https://your-app.zeabur.app/download/xxxx.png
 ```
