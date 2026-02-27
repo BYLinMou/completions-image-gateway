@@ -1,49 +1,59 @@
 # GenImage Proxy
 
-这个服务对外提供 OpenAI Chat Completions 风格接口，对上游使用 Gemini `generateContent` 格式生成图片，并返回可直接下载的图片 URL。
+OpenAI Chat Completions style in, Gemini `generateContent` upstream, downloadable image URL out.
 
-## 功能
+## Features
 
-- `POST /v1/chat/completions`：接收 OpenAI Chat 风格请求。
-- 上游请求固定走 Gemini 格式（`models/{model}:generateContent`）。
-- 生成结果落盘到本地目录，再返回下载链接。
-- 支持服务 API Key 鉴权。
-- 支持全局风格参考图：
-  - 本地路径模式（`STYLE_REFERENCE_IMAGE_PATH`）。
-  - URL 下载缓存模式（`STYLE_REFERENCE_IMAGE_URL`，自动下载到本地缓存后使用）。
-- 可在 prompt 尾部自动追加说明：风格参考图仅用于视觉风格，不是人物形象参考。
+- `POST /v1/chat/completions` with OpenAI chat format
+- Upstream request format is Gemini `models/{model}:generateContent`
+- API key auth for `/v1/*`
+- Save generated images locally and return `/download/:filename`
+- Global style-reference image support
+  - local file path mode
+  - URL download + local cache mode
+- Optional prompt tail notice that clearly says style-only reference (not identity/person reference)
 
-## 本地启动
+## Config Files
+
+- Commit `.env.example`
+- Keep `.env` local only (already ignored by `.gitignore`)
+
+Create local config:
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+## Local Run
 
 ```bash
 npm install
 npm start
 ```
 
-服务端口由 `.env` 的 `PORT` 控制，默认 `3000`。
+Port is controlled by `PORT` in `.env` (default `3000`).
 
-## Zeabur 部署步骤
+## Zeabur Deploy
 
-1. 把仓库导入 Zeabur，创建一个 Node.js Service。  
-2. Build Command: `npm install`。  
-3. Start Command: `npm start`。  
-4. 在 Zeabur 的 Environment Variables 填入下面变量。  
-5. 在 Zeabur 给这个服务挂载一个 Volume（建议挂到 `/data`）。  
-6. 把 `OUTPUT_DIR` 和 `STYLE_REFERENCE_CACHE_DIR` 指向挂载路径下的目录（见下方示例）。  
-7. 部署后，把 `BASE_URL` 设置为你的 Zeabur 公开域名（例如 `https://your-app.zeabur.app`），这样返回的下载 URL 才是公网可访问的。
-
-## Zeabur 推荐挂载
-
-- Mount Path: `/data`
-- 建议变量：
-  - `OUTPUT_DIR=/data/generated`
-  - `STYLE_REFERENCE_CACHE_DIR=/data/style-reference-cache`
-
-这样容器重启后，已生成图片和已下载的风格参考图缓存不会丢失。
+1. Import this repo into Zeabur and create a Node.js service.
+2. Build Command: `npm install`
+3. Start Command: `npm start`
+4. Add environment variables from the section below.
+5. Add a persistent Volume mount at `/data`.
+6. Set:
+   - `OUTPUT_DIR=/data/generated`
+   - `STYLE_REFERENCE_CACHE_DIR=/data/style-reference-cache`
+7. Set `BASE_URL` to your Zeabur public domain, for example `https://your-app.zeabur.app`.
 
 ## Environment Variables
 
-最小必填：
+Minimum required:
 
 ```env
 UPSTREAM_GEMINI_API_KEY=YOUR_UPSTREAM_GEMINI_API_KEY
@@ -51,7 +61,7 @@ SERVICE_API_KEY=CHANGE_ME_TO_A_STRONG_KEY
 BASE_URL=https://your-app.zeabur.app
 ```
 
-完整示例：
+Full example:
 
 ```env
 # Service
@@ -69,22 +79,21 @@ UPSTREAM_GEMINI_API_VERSION=v1beta
 UPSTREAM_GEMINI_API_KEY=YOUR_UPSTREAM_GEMINI_API_KEY
 UPSTREAM_GEMINI_MODEL=gemini-2.0-flash-exp-image-generation
 
-# Optional: custom full upstream URL (highest priority)
-# Placeholders supported: {model} {api_version} {api_key}
-# Example:
-# UPSTREAM_GEMINI_URL=https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}
+# Optional custom full upstream URL (highest priority)
+# Supported placeholders: {model} {api_version} {api_key}
+# If no key in URL and no {api_key}, service appends ?key=... automatically.
 UPSTREAM_GEMINI_URL=
 
 # Style reference
 ENABLE_STYLE_REFERENCE=true
 
-# URL mode (priority higher than local path mode)
+# URL mode (higher priority than local path mode)
 STYLE_REFERENCE_IMAGE_URL=https://example.com/style-reference.png
 
 # Local path mode (used when STYLE_REFERENCE_IMAGE_URL is empty)
 STYLE_REFERENCE_IMAGE_PATH=assets/style-reference.png
 
-# Cache for downloaded style reference URL
+# Cache for downloaded style-reference URL
 STYLE_REFERENCE_CACHE_DIR=/data/style-reference-cache
 STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST=false
 STYLE_REFERENCE_DOWNLOAD_TIMEOUT_MS=15000
@@ -92,7 +101,7 @@ STYLE_REFERENCE_DOWNLOAD_TIMEOUT_MS=15000
 # Optional override; if empty, service infers mime type
 STYLE_REFERENCE_MIME_TYPE=
 
-# Append style-only notice to prompt tail
+# Prompt tail notice (style-only, not identity/person reference)
 APPEND_STYLE_REFERENCE_NOTICE=true
 STYLE_REFERENCE_NOTICE=The reference image is STYLE-ONLY and NOT a person/identity reference. Use it only for palette, lighting, brushwork, composition, and mood. Do not copy face, identity, body, age, gender, or character-specific traits.
 
@@ -101,36 +110,14 @@ GEMINI_API_KEY=
 GEMINI_MODEL=
 ```
 
-## 风格参考图 URL 模式说明
+## API Auth
 
-当 `ENABLE_STYLE_REFERENCE=true` 且 `STYLE_REFERENCE_IMAGE_URL` 不为空时：
-
-1. 服务会从该 URL 下载参考图。  
-2. 下载后写入 `STYLE_REFERENCE_CACHE_DIR`。  
-3. 后续请求默认复用缓存（`STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST=false`）。  
-4. 如果你希望每次请求都重新拉取最新参考图，设置 `STYLE_REFERENCE_REFRESH_ON_EACH_REQUEST=true`。  
-
-优先级：
-
-- `STYLE_REFERENCE_IMAGE_URL`（高）
-- `STYLE_REFERENCE_IMAGE_PATH`（低）
-
-## 上游格式（Gemini）
-
-服务对上游请求使用 Gemini `generateContent`：
-
-- 默认模板：  
-  `UPSTREAM_GEMINI_BASE_URL/UPSTREAM_GEMINI_API_VERSION/models/{UPSTREAM_GEMINI_MODEL}:generateContent?key=UPSTREAM_GEMINI_API_KEY`
-- 如果配置了 `UPSTREAM_GEMINI_URL`，则优先使用该 URL。
-
-## 鉴权
-
-默认 `REQUIRE_SERVICE_API_KEY=true`，请求 `/v1/*` 需带 API Key：
+If `REQUIRE_SERVICE_API_KEY=true`, `/v1/*` must include:
 
 - `Authorization: Bearer <SERVICE_API_KEY>`
-- 或 `x-api-key: <SERVICE_API_KEY>`
+- or `x-api-key: <SERVICE_API_KEY>`
 
-## 调用示例
+## Example Request
 
 ```bash
 curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
@@ -145,7 +132,7 @@ curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
   }'
 ```
 
-返回里 `choices[0].message.content` 是下载地址，例如：
+`choices[0].message.content` is a direct download URL:
 
 ```json
 {
@@ -162,7 +149,7 @@ curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
 }
 ```
 
-## 路由
+## Routes
 
 - `POST /v1/chat/completions`
 - `GET /download/:filename`
