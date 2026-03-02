@@ -44,6 +44,7 @@ STYLE_NOTICE=The reference image is STYLE-ONLY and NOT a person/identity referen
 LOG_LEVEL=info
 LOG_REQUEST_BODY=false
 STREAM_CHUNK_SIZE=120
+SSE_HEARTBEAT_INTERVAL_MS=15000
 ```
 
 ## Important Notes
@@ -62,6 +63,7 @@ STREAM_CHUNK_SIZE=120
 - Downstream `content[]` order is preserved when forwarding to Gemini (`text/image/text/image` stays in that order).
 - If both downstream image and global style reference are enabled, both are sent to Gemini (no overwrite).
 - This proxy handles both `stream=true/false` from downstream and rewrites internally.
+- When `stream=true`, service sends SSE heartbeat comments (`: ping`) every `SSE_HEARTBEAT_INTERVAL_MS` to reduce idle-connection timeouts.
 
 ## Aspect Ratio Examples
 
@@ -147,3 +149,4 @@ https://your-app.zeabur.app/download/xxxx.png
 ```
 
 For `stream=true`, response is SSE in `chat.completion.chunk` format and ends with `data: [DONE]`.
+SSE heartbeat comments are emitted periodically (for example `: ping`).

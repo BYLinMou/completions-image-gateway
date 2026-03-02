@@ -51,6 +51,10 @@ const STYLE_NOTICE =
 const LOG_LEVEL = normalizeLogLevel(process.env.LOG_LEVEL || "info");
 const LOG_REQUEST_BODY = parseBoolean(process.env.LOG_REQUEST_BODY, false);
 const STREAM_CHUNK_SIZE = parsePositiveInt(process.env.STREAM_CHUNK_SIZE, 120);
+const SSE_HEARTBEAT_INTERVAL_MS = parsePositiveInt(
+  process.env.SSE_HEARTBEAT_INTERVAL_MS,
+  15000
+);
 
 const outputDirAbsPath = path.resolve(process.cwd(), OUTPUT_DIR);
 const styleReferenceCacheAbsPath = path.resolve(process.cwd(), STYLE_REFERENCE_CACHE_DIR);
@@ -267,6 +271,11 @@ function writeSseData(res, payload) {
 
 function writeSseDone(res) {
   res.write("data: [DONE]\n\n");
+}
+
+function writeSseComment(res, comment = "ping") {
+  const normalized = String(comment || "ping").replace(/[\r\n]+/g, " ").trim() || "ping";
+  res.write(`: ${normalized}\n\n`);
 }
 
 function splitIntoStreamChunks(text) {
@@ -864,6 +873,7 @@ function streamChatCompletionResponse({
 
 app.post("/v1/chat/completions", async (req, res) => {
   let streamRequested = false;
+  let streamHeartbeat = null;
   try {
     const { model, messages, stream } = req.body || {};
     streamRequested = isStreamRequested(stream);
@@ -882,6 +892,17 @@ app.post("/v1/chat/completions", async (req, res) => {
           type: "invalid_request_error"
         }
       });
+    }
+
+    if (streamRequested) {
+      initializeSse(res);
+      writeSseComment(res, "connected");
+      streamHeartbeat = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          return;
+        }
+        writeSseComment(res, "ping");
+      }, SSE_HEARTBEAT_INTERVAL_MS);
     }
 
     const finalRequestParts = appendStyleNoticeToParts(userInput.parts);
@@ -907,9 +928,9 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (streamRequested) {
       logInfo("Sending streaming chat response", {
         request_id: req.requestId,
-        completion_id: completionId
+        completion_id: completionId,
+        heartbeat_interval_ms: SSE_HEARTBEAT_INTERVAL_MS
       });
-      initializeSse(res);
       streamChatCompletionResponse({
         res,
         completionId,
@@ -971,6 +992,10 @@ app.post("/v1/chat/completions", async (req, res) => {
         type: "server_error"
       }
     });
+  } finally {
+    if (streamHeartbeat) {
+      clearInterval(streamHeartbeat);
+    }
   }
 });
 
@@ -985,7 +1010,8 @@ app.listen(PORT, () => {
     log_level: LOG_LEVEL,
     require_api_key: REQUIRE_API_KEY,
     style_reference_enabled: ENABLE_STYLE_REFERENCE,
-    gemini_image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO
+    gemini_image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO,
+    sse_heartbeat_interval_ms: SSE_HEARTBEAT_INTERVAL_MS
   });
 });
 
