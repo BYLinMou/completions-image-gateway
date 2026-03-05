@@ -14,6 +14,14 @@ const DEFAULT_GEMINI_MODELS = [
   "gemini-3.1-flash-image-preview",
   "gemini-3-pro-image-preview"
 ];
+const MODEL_ALIASES = {
+  "nano-banana": "gemini-2.5-flash-image",
+  "nano-banana-2": "gemini-3.1-flash-image-preview",
+  "nano-banana-pro": "gemini-3-pro-image-preview"
+};
+const MODEL_ALIASES_LOWER = Object.fromEntries(
+  Object.entries(MODEL_ALIASES).map(([key, value]) => [key.toLowerCase(), value])
+);
 const GEMINI_DEFAULT_MODEL = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODELS[0];
 const GEMINI_ENDPOINT = process.env.GEMINI_ENDPOINT || "";
 const SUPPORTED_GEMINI_IMAGE_ASPECT_RATIOS = new Set([
@@ -539,11 +547,18 @@ function normalizeDownstreamModel(model) {
   return model.trim();
 }
 
+function resolveGeminiModelFromDownstream(model) {
+  const normalized = normalizeDownstreamModel(model);
+  if (!normalized) return "";
+  return MODEL_ALIASES_LOWER[normalized.toLowerCase()] || normalized;
+}
+
 function getAvailableGeminiModels() {
   const set = new Set(DEFAULT_GEMINI_MODELS);
   if (GEMINI_DEFAULT_MODEL) {
     set.add(GEMINI_DEFAULT_MODEL);
   }
+  for (const aliasId of Object.keys(MODEL_ALIASES)) set.add(aliasId);
   return Array.from(set);
 }
 
@@ -924,8 +939,10 @@ app.post("/v1/chat/completions", async (req, res) => {
   try {
     const { model, messages, stream } = req.body || {};
     streamRequested = isStreamRequested(stream);
-    const selectedModel = normalizeDownstreamModel(model) || GEMINI_DEFAULT_MODEL;
-    const responseModel = selectedModel;
+    const requestedModel = normalizeDownstreamModel(model);
+    const upstreamModel =
+      resolveGeminiModelFromDownstream(requestedModel) || GEMINI_DEFAULT_MODEL;
+    const responseModel = requestedModel || GEMINI_DEFAULT_MODEL;
     const completionId = `chatcmpl-${uuidv4()}`;
 
     const userInput = await extractUserInput(messages);
@@ -956,7 +973,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     const finalRequestParts = appendStyleNoticeToParts(userInput.parts);
     const image = await generateImageFromGemini({
       requestParts: finalRequestParts,
-      model: selectedModel
+      model: upstreamModel
     });
     const extension = inferExtension(image.mimeType);
     const fileName = `${uuidv4()}.${extension}`;
