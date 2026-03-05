@@ -27,7 +27,7 @@ REQUIRE_API_KEY=true
 API_KEY=CHANGE_ME_TO_A_STRONG_KEY
 
 GEMINI_API_KEY=YOUR_GEMINI_API_KEY
-GEMINI_MODEL=gemini-2.0-flash-exp-image-generation
+GEMINI_MODEL=gemini-2.5-flash-image
 GEMINI_IMAGE_ASPECT_RATIO=1:1
 GEMINI_ENDPOINT=
 
@@ -106,12 +106,19 @@ If `REQUIRE_API_KEY=true`, include either:
 
 ## Request Example
 
+List models (OpenAI compatible):
+
+```bash
+curl -X GET "https://your-app.zeabur.app/v1/models" \
+  -H "Authorization: Bearer CHANGE_ME_TO_A_STRONG_KEY"
+```
+
 ```bash
 curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer CHANGE_ME_TO_A_STRONG_KEY" \
   -d '{
-    "model": "gpt-4o-mini",
+    "model": "gemini-2.5-flash-image",
     "stream": true,
     "messages": [
       {"role": "user", "content": "A cinematic portrait of a cyberpunk cat in neon rain"}
@@ -126,7 +133,7 @@ curl -X POST "https://your-app.zeabur.app/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer CHANGE_ME_TO_A_STRONG_KEY" \
   -d '{
-    "model": "gpt-4o-mini",
+    "model": "gemini-3.1-flash-image-preview",
     "stream": false,
     "messages": [
       {

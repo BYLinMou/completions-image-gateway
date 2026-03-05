@@ -9,8 +9,12 @@ app.use(express.json({ limit: "20mb" }));
 
 const PORT = Number(process.env.PORT || 3000);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL =
-  process.env.GEMINI_MODEL || "gemini-2.0-flash-exp-image-generation";
+const DEFAULT_GEMINI_MODELS = [
+  "gemini-2.5-flash-image",
+  "gemini-3.1-flash-image-preview",
+  "gemini-3-pro-image-preview"
+];
+const GEMINI_DEFAULT_MODEL = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODELS[0];
 const GEMINI_ENDPOINT = process.env.GEMINI_ENDPOINT || "";
 const SUPPORTED_GEMINI_IMAGE_ASPECT_RATIOS = new Set([
   "1:1",
@@ -530,11 +534,25 @@ function appendStyleNoticeToParts(parts) {
   return [...normalized, { text: notice }];
 }
 
-function buildGeminiEndpoint() {
+function normalizeDownstreamModel(model) {
+  if (typeof model !== "string") return "";
+  return model.trim();
+}
+
+function getAvailableGeminiModels() {
+  const set = new Set(DEFAULT_GEMINI_MODELS);
+  if (GEMINI_DEFAULT_MODEL) {
+    set.add(GEMINI_DEFAULT_MODEL);
+  }
+  return Array.from(set);
+}
+
+function buildGeminiEndpoint(model) {
+  const selectedModel = normalizeDownstreamModel(model) || GEMINI_DEFAULT_MODEL;
   if (GEMINI_ENDPOINT) {
     const hadApiKeyPlaceholder = GEMINI_ENDPOINT.includes("{api_key}");
     let endpoint = GEMINI_ENDPOINT
-      .replace(/\{model\}/g, encodeURIComponent(GEMINI_MODEL))
+      .replace(/\{model\}/g, encodeURIComponent(selectedModel))
       .replace(/\{api_key\}/g, encodeURIComponent(GEMINI_API_KEY));
 
     if (!hadApiKeyPlaceholder && !/[?&]key=/.test(endpoint)) {
@@ -547,7 +565,7 @@ function buildGeminiEndpoint() {
   }
 
   return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    GEMINI_MODEL
+    selectedModel
   )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 }
 
@@ -708,11 +726,12 @@ async function loadStyleReferenceInlineData() {
   };
 }
 
-async function generateImageFromGemini({ requestParts = [] }) {
+async function generateImageFromGemini({ requestParts = [], model }) {
   if (!GEMINI_API_KEY) {
     throw new Error("Missing GEMINI_API_KEY in .env");
   }
 
+  const selectedModel = normalizeDownstreamModel(model) || GEMINI_DEFAULT_MODEL;
   const normalizedRequestParts = Array.isArray(requestParts)
     ? requestParts.filter(Boolean)
     : [];
@@ -720,10 +739,10 @@ async function generateImageFromGemini({ requestParts = [] }) {
     (part) => part && part.inlineData && part.inlineData.data
   ).length;
 
-  const endpoint = buildGeminiEndpoint();
+  const endpoint = buildGeminiEndpoint(selectedModel);
   logInfo("Calling Gemini upstream", {
     endpoint: maskApiKeyInUrl(endpoint),
-    model: GEMINI_MODEL,
+    model: selectedModel,
     image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO,
     downstream_image_count: downstreamImageCount
   });
@@ -871,13 +890,42 @@ function streamChatCompletionResponse({
   res.end();
 }
 
+app.get("/v1/models", (req, res) => {
+  const created = Math.floor(Date.now() / 1000);
+  const data = getAvailableGeminiModels().map((id) => ({
+    id,
+    object: "model",
+    created,
+    owned_by: "google"
+  }));
+  return res.json({ object: "list", data });
+});
+
+app.get("/v1/models/:id", (req, res) => {
+  const id = String(req.params.id || "").trim();
+  const created = Math.floor(Date.now() / 1000);
+  if (!id) {
+    return res.status(404).json({
+      error: { message: "Model not found", type: "invalid_request_error" }
+    });
+  }
+  const available = new Set(getAvailableGeminiModels());
+  if (!available.has(id)) {
+    return res.status(404).json({
+      error: { message: "Model not found", type: "invalid_request_error" }
+    });
+  }
+  return res.json({ id, object: "model", created, owned_by: "google" });
+});
+
 app.post("/v1/chat/completions", async (req, res) => {
   let streamRequested = false;
   let streamHeartbeat = null;
   try {
     const { model, messages, stream } = req.body || {};
     streamRequested = isStreamRequested(stream);
-    const responseModel = model || "gpt-4o-mini";
+    const selectedModel = normalizeDownstreamModel(model) || GEMINI_DEFAULT_MODEL;
+    const responseModel = selectedModel;
     const completionId = `chatcmpl-${uuidv4()}`;
 
     const userInput = await extractUserInput(messages);
@@ -907,7 +955,8 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     const finalRequestParts = appendStyleNoticeToParts(userInput.parts);
     const image = await generateImageFromGemini({
-      requestParts: finalRequestParts
+      requestParts: finalRequestParts,
+      model: selectedModel
     });
     const extension = inferExtension(image.mimeType);
     const fileName = `${uuidv4()}.${extension}`;
