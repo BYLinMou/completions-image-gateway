@@ -34,6 +34,18 @@ const SUPPORTED_GEMINI_IMAGE_ASPECT_RATIOS = new Set([
 const GEMINI_IMAGE_ASPECT_RATIO = normalizeGeminiImageAspectRatio(
   process.env.GEMINI_IMAGE_ASPECT_RATIO || "1:1"
 );
+const GEMINI_IMAGE_SIZE_2K_ENABLED = parseBoolean(
+  process.env.GEMINI_IMAGE_SIZE_2K_ENABLED,
+  true
+);
+const GEMINI_IMAGE_SIZE_4K_ENABLED = parseBoolean(
+  process.env.GEMINI_IMAGE_SIZE_4K_ENABLED,
+  false
+);
+const GEMINI_IMAGE_SIZE = resolveGeminiImageSize({
+  enable2k: GEMINI_IMAGE_SIZE_2K_ENABLED,
+  enable4k: GEMINI_IMAGE_SIZE_4K_ENABLED
+});
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const OUTPUT_DIR = process.env.OUTPUT_DIR || "generated";
 
@@ -248,6 +260,39 @@ function normalizeGeminiImageAspectRatio(value) {
     );
   }
   return normalized;
+}
+
+function resolveGeminiImageSize({ enable2k, enable4k }) {
+  if (enable4k) return "4K";
+  if (enable2k) return "2K";
+  return "";
+}
+
+function shouldSendGeminiImageSize(model) {
+  const normalized = normalizeDownstreamModel(model).toLowerCase();
+  return !normalized.startsWith("gemini-2.5-flash-image");
+}
+
+function resolveGeminiAspectRatioFromDownstream(body) {
+  const candidates = [
+    body?.image_aspect_ratio,
+    body?.aspect_ratio,
+    body?.imageAspectRatio,
+    body?.extra_body?.image_aspect_ratio,
+    body?.extra_body?.aspect_ratio,
+    body?.extraBody?.imageAspectRatio,
+    body?.generationConfig?.imageConfig?.aspectRatio,
+    body?.generation_config?.image_config?.aspect_ratio
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (!trimmed) continue;
+    return normalizeGeminiImageAspectRatio(trimmed);
+  }
+
+  return GEMINI_IMAGE_ASPECT_RATIO;
 }
 
 function isStreamRequested(value) {
@@ -741,12 +786,17 @@ async function loadStyleReferenceInlineData() {
   };
 }
 
-async function generateImageFromGemini({ requestParts = [], model }) {
+async function generateImageFromGemini({
+  requestParts = [],
+  model,
+  aspectRatio = GEMINI_IMAGE_ASPECT_RATIO
+}) {
   if (!GEMINI_API_KEY) {
     throw new Error("Missing GEMINI_API_KEY in .env");
   }
 
   const selectedModel = normalizeDownstreamModel(model) || GEMINI_DEFAULT_MODEL;
+  const sendImageSize = shouldSendGeminiImageSize(selectedModel);
   const normalizedRequestParts = Array.isArray(requestParts)
     ? requestParts.filter(Boolean)
     : [];
@@ -758,7 +808,9 @@ async function generateImageFromGemini({ requestParts = [], model }) {
   logInfo("Calling Gemini upstream", {
     endpoint: maskApiKeyInUrl(endpoint),
     model: selectedModel,
-    image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO,
+    image_aspect_ratio: aspectRatio,
+    image_size: sendImageSize ? GEMINI_IMAGE_SIZE || "unset" : "dropped_for_2_5",
+    image_config_sent: true,
     downstream_image_count: downstreamImageCount
   });
 
@@ -768,6 +820,16 @@ async function generateImageFromGemini({ requestParts = [], model }) {
     finalRequestParts.push(styleReferencePart);
   }
 
+  const generationConfig = {
+    responseModalities: ["TEXT", "IMAGE"],
+    imageConfig: {
+      aspectRatio
+    }
+  };
+  if (sendImageSize && GEMINI_IMAGE_SIZE) {
+    generationConfig.imageConfig.imageSize = GEMINI_IMAGE_SIZE;
+  }
+
   const payload = {
     contents: [
       {
@@ -775,12 +837,7 @@ async function generateImageFromGemini({ requestParts = [], model }) {
         parts: finalRequestParts
       }
     ],
-    generationConfig: {
-      responseModalities: ["TEXT", "IMAGE"],
-      imageConfig: {
-        aspectRatio: GEMINI_IMAGE_ASPECT_RATIO
-      }
-    }
+    generationConfig
   };
 
   const response = await fetch(endpoint, {
@@ -937,12 +994,14 @@ app.post("/v1/chat/completions", async (req, res) => {
   let streamRequested = false;
   let streamHeartbeat = null;
   try {
-    const { model, messages, stream } = req.body || {};
+    const requestBody = req.body || {};
+    const { model, messages, stream } = requestBody;
     streamRequested = isStreamRequested(stream);
     const requestedModel = normalizeDownstreamModel(model);
     const upstreamModel =
       resolveGeminiModelFromDownstream(requestedModel) || GEMINI_DEFAULT_MODEL;
     const responseModel = requestedModel || GEMINI_DEFAULT_MODEL;
+    const upstreamAspectRatio = resolveGeminiAspectRatioFromDownstream(requestBody);
     const completionId = `chatcmpl-${uuidv4()}`;
 
     const userInput = await extractUserInput(messages);
@@ -973,7 +1032,8 @@ app.post("/v1/chat/completions", async (req, res) => {
     const finalRequestParts = appendStyleNoticeToParts(userInput.parts);
     const image = await generateImageFromGemini({
       requestParts: finalRequestParts,
-      model: upstreamModel
+      model: upstreamModel,
+      aspectRatio: upstreamAspectRatio
     });
     const extension = inferExtension(image.mimeType);
     const fileName = `${uuidv4()}.${extension}`;
@@ -1070,6 +1130,10 @@ app.get("/health", (_req, res) => {
 });
 
 app.listen(PORT, () => {
+  if (GEMINI_IMAGE_SIZE_2K_ENABLED && GEMINI_IMAGE_SIZE_4K_ENABLED) {
+    logWarn("Both GEMINI_IMAGE_SIZE_2K_ENABLED and GEMINI_IMAGE_SIZE_4K_ENABLED are true. Using 4K.");
+  }
+
   logInfo("GenImage proxy started", {
     port: PORT,
     base_url: BASE_URL,
@@ -1077,6 +1141,9 @@ app.listen(PORT, () => {
     require_api_key: REQUIRE_API_KEY,
     style_reference_enabled: ENABLE_STYLE_REFERENCE,
     gemini_image_aspect_ratio: GEMINI_IMAGE_ASPECT_RATIO,
+    gemini_image_size_2k_enabled: GEMINI_IMAGE_SIZE_2K_ENABLED,
+    gemini_image_size_4k_enabled: GEMINI_IMAGE_SIZE_4K_ENABLED,
+    gemini_image_size: GEMINI_IMAGE_SIZE || "unset",
     sse_heartbeat_interval_ms: SSE_HEARTBEAT_INTERVAL_MS
   });
 });

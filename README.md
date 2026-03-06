@@ -29,6 +29,8 @@ API_KEY=CHANGE_ME_TO_A_STRONG_KEY
 GEMINI_API_KEY=YOUR_GEMINI_API_KEY
 GEMINI_MODEL=gemini-2.5-flash-image
 GEMINI_IMAGE_ASPECT_RATIO=1:1
+GEMINI_IMAGE_SIZE_2K_ENABLED=true
+GEMINI_IMAGE_SIZE_4K_ENABLED=false
 GEMINI_ENDPOINT=
 
 ENABLE_STYLE_REFERENCE=true
@@ -54,6 +56,10 @@ SSE_HEARTBEAT_INTERVAL_MS=15000
 - If `GEMINI_ENDPOINT` has no `key=` and no `{api_key}`, service appends `?key=...` automatically.
 - `GEMINI_ENDPOINT` must be a full Gemini API endpoint to `:generateContent`.
 - `GEMINI_IMAGE_ASPECT_RATIO` controls generated image ratio. Default: `1:1`. Supported values: `1:1`, `3:4`, `4:3`, `9:16`, `16:9`.
+- Downstream can override aspect ratio per request via `image_aspect_ratio` (or `aspect_ratio`). If absent, service falls back to `GEMINI_IMAGE_ASPECT_RATIO`.
+- `GEMINI_IMAGE_SIZE_2K_ENABLED` / `GEMINI_IMAGE_SIZE_4K_ENABLED` control whether `imageConfig.imageSize` is sent upstream.
+- Default: `2K=true`, `4K=false`. If both are `true`, service uses `4K`. If both are `false`, service does not send `imageSize`.
+- When model is `gemini-2.5-flash-image`, service keeps `imageConfig.aspectRatio` but drops `imageConfig.imageSize`.
 - Correct: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}`
 - Wrong: `https://apiexample.ai`
 - `STYLE_REFERENCE_SOURCE` supports one value only:
