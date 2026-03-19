@@ -38,6 +38,7 @@ STYLE_REFERENCE_SOURCE=https://example.com/style-reference.png
 STYLE_REFERENCE_CACHE_DIR=/data/style-reference-cache
 STYLE_REFERENCE_REFRESH=false
 STYLE_REFERENCE_TIMEOUT_MS=15000
+UPSTREAM_TIMEOUT_MS=180000
 STYLE_REFERENCE_MIME_TYPE=
 
 APPEND_STYLE_NOTICE=true
@@ -65,6 +66,8 @@ SSE_HEARTBEAT_INTERVAL_MS=15000
 - `STYLE_REFERENCE_SOURCE` supports one value only:
 - URL mode: `https://...`
 - Local path mode: `assets/style-reference.png`
+- `STYLE_REFERENCE_TIMEOUT_MS` only controls image-reference download timeout.
+- `UPSTREAM_TIMEOUT_MS` controls how long the service waits for Gemini `generateContent` to return. Default: `180000`.
 - Downstream `chat/completions` image input is supported from `messages[].content[]` with `type: "image_url"` (and `input_image`).
 - Downstream `content[]` order is preserved when forwarding to Gemini (`text/image/text/image` stays in that order).
 - If both downstream image and global style reference are enabled, both are sent to Gemini (no overwrite).

@@ -69,6 +69,10 @@ const STYLE_REFERENCE_TIMEOUT_MS = parsePositiveInt(
   process.env.STYLE_REFERENCE_TIMEOUT_MS,
   15000
 );
+const UPSTREAM_TIMEOUT_MS = parsePositiveInt(
+  process.env.UPSTREAM_TIMEOUT_MS,
+  180000
+);
 const STYLE_NOTICE =
   process.env.STYLE_NOTICE ||
   "The reference image is STYLE-ONLY. Use it only for overall visual style (palette, lighting, brushwork, composition, mood). It is NOT a person/identity reference. Do not copy face, identity, body, age, gender, or character-specific traits.";
@@ -811,7 +815,8 @@ async function generateImageFromGemini({
     image_aspect_ratio: aspectRatio,
     image_size: sendImageSize ? GEMINI_IMAGE_SIZE || "unset" : "dropped_for_2_5",
     image_config_sent: true,
-    downstream_image_count: downstreamImageCount
+    downstream_image_count: downstreamImageCount,
+    timeout_ms: UPSTREAM_TIMEOUT_MS
   });
 
   const styleReferencePart = await loadStyleReferenceInlineData();
@@ -840,13 +845,29 @@ async function generateImageFromGemini({
     generationConfig
   };
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, UPSTREAM_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Gemini upstream request timed out after ${UPSTREAM_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   logInfo("Gemini upstream responded", {
     status_code: response.status,
@@ -1144,6 +1165,7 @@ app.listen(PORT, () => {
     gemini_image_size_2k_enabled: GEMINI_IMAGE_SIZE_2K_ENABLED,
     gemini_image_size_4k_enabled: GEMINI_IMAGE_SIZE_4K_ENABLED,
     gemini_image_size: GEMINI_IMAGE_SIZE || "unset",
+    upstream_timeout_ms: UPSTREAM_TIMEOUT_MS,
     sse_heartbeat_interval_ms: SSE_HEARTBEAT_INTERVAL_MS
   });
 });
